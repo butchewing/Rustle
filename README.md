@@ -30,7 +30,7 @@ No bloat. No distractions. Just pure speed and reliability.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # 2. Install Rustle
-cargo install --git https://github.com/YOURUSERNAME/rustle.git
+cargo install --git https://github.com/butchewing/rustle.git
 
 # 3. Start rustling!
 rustle add "Finish the Rustle README" --due "today"
@@ -54,7 +54,7 @@ rustle complete 1
 ## 🛠️ Building from Source
 
 ```bash
-git clone https://github.com/YOURUSERNAME/rustle.git
+git clone https://github.com/butchewing/rustle.git
 cd rustle
 cargo build --release
 
