@@ -23,16 +23,33 @@ No bloat. No distractions. Just pure speed and reliability.
 - ⚡ Blazing fast and memory-safe (thanks to Rust)
 - 🛠️ Easy to extend and hack on
 
-## 🚀 Quick Start
+## 🚀 Installation
+
+### Prerequisites
+
+Install Rust if needed:
 
 ```bash
-# 1. Install Rust (if you don't have it)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
-# 2. Install Rustle
+### Install from GitHub (recommended)
+
+```bash
 cargo install --git https://github.com/butchewing/rustle.git
+```
 
-# 3. Start rustling!
+### Install from a local clone
+
+```bash
+cargo install --path .
+```
+
+Both install methods put `rustle` in `~/.cargo/bin`.
+
+### Try it
+
+```bash
 rustle add "Finish the Rustle README" --due "today"
 rustle list
 rustle list --overdue
@@ -53,12 +70,12 @@ rustle complete 1
 
 ## 🛠️ Building from Source
 
+For local development without installing globally:
+
 ```bash
 git clone https://github.com/butchewing/rustle.git
 cd rustle
 cargo build --release
-
-# Run it directly
 ./target/release/rustle list
 ```
 
@@ -69,7 +86,7 @@ PRs are very welcome! Fork it and start rustling some code.
 
 ## License
 
-[MIT License](LICENSE) — Free to use, modify, and ship.
+[MIT License](LICENSE.txt) — Free to use, modify, and ship.
 
 ---
 
