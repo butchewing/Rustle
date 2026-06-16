@@ -1,0 +1,17 @@
+[package]
+name = "rustle"
+version = "0.1.0"
+edition = "2026"
+authors = ["Butch Ewing butch@butchewing.com"]
+description = "A fast, delightful CLI task manager written in Rust"
+license = "MIT"
+repository = "https://github.com/butchewing/rustle"
+keywords = ["cli", "task-manager", "todo", "productivity", "rust"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+humantime = "2.1"
+colored = "2.1"

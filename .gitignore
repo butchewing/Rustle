@@ -1,0 +1,25 @@
+
+---
+
+### **`.gitignore`**
+
+```gitignore
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Database
+tasks.db
+*.db-shm
+*.db-wal
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
