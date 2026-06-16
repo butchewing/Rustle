@@ -1,7 +1,7 @@
 [package]
 name = "rustle"
 version = "0.1.0"
-edition = "2026"
+edition = "2021"
 authors = ["Butch Ewing butch@butchewing.com"]
 description = "A fast, delightful CLI task manager written in Rust"
 license = "MIT"
