@@ -1,0 +1,51 @@
+# Auto-merge green Dependabot PRs (7-day cooldown policy).
+#
+# Non-major updates: squash-merge once checks are green.
+# Major updates: label `dependabot-major` + `needs-review`, leave for a human.
+#
+# Hardened pattern:
+#   - `pull_request_target` runs in BASE-repo context with the write perms it
+#     needs. We inspect PR *metadata* only and never check out PR code, so
+#     untrusted-code execution is not a concern.
+#   - Third-party actions pinned to immutable commit SHAs. Dependabot keeps
+#     these current via the github-actions entry in dependabot.yml.
+#   - timeout + --fail-fast so a red/stuck check cannot hang the job.
+name: Dependabot auto-merge
+
+on: pull_request_target
+
+permissions:
+  contents: write
+  pull-requests: write
+  # `gh pr checks` reads statusCheckRollup via GraphQL; without these the
+  # watch step fails with "Resource not accessible by integration".
+  checks: read
+  statuses: read
+
+jobs:
+  automerge:
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    timeout-minutes: 15
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Squash-merge non-major updates after CI
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        run: |
+          gh pr checks "$PR_URL" --watch --interval 10 --fail-fast
+          gh pr merge --squash "$PR_URL" --delete-branch
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Label major updates for manual review
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        run: gh pr edit "$PR_URL" --add-label "dependabot-major,needs-review"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
