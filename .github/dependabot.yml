@@ -1,0 +1,42 @@
+# Dependabot config — standard posture (7-day cooldown + security passthrough).
+#
+# Policy:
+#   - 7-day per-package age gate via native `cooldown`. Applies to VERSION
+#     updates only; Dependabot SECURITY updates bypass cooldown automatically,
+#     so advisory fixes still land immediately. (GitHub applies a 3-day default
+#     even with no config; this raises it to 7 and makes it explicit.)
+#   - Conventional-Commit PR titles (we squash-merge; title -> commit subject).
+#   - Bounded grouping: prod/dev x patch/minor. Majors ungrouped so each gets
+#     its own PR for clean bisection and human review.
+#
+# Docs: https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference
+version: 2
+updates:
+  - package-ecosystem: 'cargo'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'monday'
+      time: '06:00'
+      timezone: 'America/Chicago'
+    open-pull-requests-limit: 10
+    # 7-day age gate. Security-advisory updates bypass cooldown automatically.
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: 'chore'
+      include: 'scope'
+    labels:
+      - 'dependencies'
+      - 'cargo'
+    # Majors intentionally NOT grouped — one PR each.
+    groups:
+      prod-patch:
+        dependency-type: 'production'
+        update-types: ['patch']
+      prod-minor:
+        dependency-type: 'production'
+        update-types: ['minor']
+      dev-non-major:
+        dependency-type: 'development'
+        update-types: ['minor', 'patch']
