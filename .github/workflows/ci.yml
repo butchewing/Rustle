@@ -22,7 +22,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
+      # No Cargo.lock is committed, so --locked fails outright. Once a lockfile
+      # is committed, add --locked back to make builds reproducible.
       - name: Build
-        run: cargo build --locked --all-targets
+        run: cargo build --all-targets
       - name: Test
-        run: cargo test --locked
+        run: cargo test
