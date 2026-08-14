@@ -17,6 +17,8 @@ on: pull_request_target
 permissions:
   contents: write
   pull-requests: write
+  # `gh label create` writes repo labels, which is an issues scope.
+  issues: write
   # `gh pr checks` reads statusCheckRollup via GraphQL; without these the
   # watch step fails with "Resource not accessible by integration".
   checks: read
@@ -45,7 +47,16 @@ jobs:
 
       - name: Label major updates for manual review
         if: steps.meta.outputs.update-type == 'version-update:semver-major'
-        run: gh pr edit "$PR_URL" --add-label "dependabot-major,needs-review"
+        run: |
+          # `gh pr edit --add-label` exits non-zero when a label is missing from
+          # the repo, which failed this job on every major bump. Create the
+          # labels first (idempotent) and never let labelling break the run.
+          gh label create dependabot-major --color D93F0B \
+            --description "Major dependency bump - needs a human" --force || true
+          gh label create needs-review --color FBCA04 \
+            --description "Awaiting manual review" --force || true
+          gh pr edit "$PR_URL" --add-label "dependabot-major,needs-review" || true
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
