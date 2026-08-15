@@ -9,7 +9,9 @@
 #     untrusted-code execution is not a concern.
 #   - Third-party actions pinned to immutable commit SHAs. Dependabot keeps
 #     these current via the github-actions entry in dependabot.yml.
-#   - timeout + --fail-fast so a red/stuck check cannot hang the job.
+#   - Merging uses GitHub's native auto-merge, which waits for required checks
+#     server-side. The job exits in seconds instead of holding a billable
+#     runner in a `gh pr checks --watch` polling loop.
 name: Dependabot auto-merge
 
 on: pull_request_target
@@ -19,16 +21,12 @@ permissions:
   pull-requests: write
   # `gh label create` writes repo labels, which is an issues scope.
   issues: write
-  # `gh pr checks` reads statusCheckRollup via GraphQL; without these the
-  # watch step fails with "Resource not accessible by integration".
-  checks: read
-  statuses: read
 
 jobs:
   automerge:
     runs-on: ubuntu-latest
     if: github.actor == 'dependabot[bot]'
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
       - name: Fetch Dependabot metadata
         id: meta
@@ -36,11 +34,9 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Squash-merge non-major updates after CI
+      - name: Enable auto-merge for non-major updates
         if: steps.meta.outputs.update-type != 'version-update:semver-major'
-        run: |
-          gh pr checks "$PR_URL" --watch --interval 10 --fail-fast
-          gh pr merge --squash "$PR_URL" --delete-branch
+        run: gh pr merge --squash --auto --delete-branch "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
