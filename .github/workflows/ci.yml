@@ -1,0 +1,30 @@
+# Minimal build check.
+#
+# Exists so Dependabot auto-merge has a real signal to gate on: a dependency
+# bump only merges (and therefore only deploys) if the project still builds.
+# Without this the automerge job would find no checks and never merge.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      # No Cargo.lock is committed, so --locked fails outright. Once a lockfile
+      # is committed, add --locked back to make builds reproducible.
+      - name: Build
+        run: cargo build --all-targets
+      - name: Test
+        run: cargo test

@@ -1,0 +1,58 @@
+# Auto-merge green Dependabot PRs (7-day cooldown policy).
+#
+# Non-major updates: squash-merge once checks are green.
+# Major updates: label `dependabot-major` + `needs-review`, leave for a human.
+#
+# Hardened pattern:
+#   - `pull_request_target` runs in BASE-repo context with the write perms it
+#     needs. We inspect PR *metadata* only and never check out PR code, so
+#     untrusted-code execution is not a concern.
+#   - Third-party actions pinned to immutable commit SHAs. Dependabot keeps
+#     these current via the github-actions entry in dependabot.yml.
+#   - Merging uses GitHub's native auto-merge, which waits for required checks
+#     server-side. The job exits in seconds instead of holding a billable
+#     runner in a `gh pr checks --watch` polling loop.
+name: Dependabot auto-merge
+
+on: pull_request_target
+
+permissions:
+  contents: write
+  pull-requests: write
+  # `gh label create` writes repo labels, which is an issues scope.
+  issues: write
+
+jobs:
+  automerge:
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    timeout-minutes: 5
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable auto-merge for non-major updates
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        run: gh pr merge --squash --auto --delete-branch "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Label major updates for manual review
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        run: |
+          # `gh pr edit --add-label` exits non-zero when a label is missing from
+          # the repo, which failed this job on every major bump. Create the
+          # labels first (idempotent) and never let labelling break the run.
+          gh label create dependabot-major --color D93F0B \
+            --description "Major dependency bump - needs a human" --force || true
+          gh label create needs-review --color FBCA04 \
+            --description "Awaiting manual review" --force || true
+          gh pr edit "$PR_URL" --add-label "dependabot-major,needs-review" || true
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
