@@ -127,6 +127,32 @@ jobs:
             TYPE = re.compile(r"(?m)^\s*update-type:\s*(\S+)\s*$")
             NAME = re.compile(r"(?m)^\s*-?\s*dependency-name:\s*\S")
 
+            DEP = re.compile(r"(?m)^\s*-?\s*dependency-name:\s*(\S+)\s*$")
+            VER = re.compile(r"(?m)^\s*dependency-version:\s*(\S+)\s*$")
+            SEMVER = re.compile(r"^v?(\d+)\.(\d+)(?:\.(\d+))?(?:[-+].*)?$")
+
+            def derive(msg, entry):
+                # Compare majors from "Bumps X from A to B" / "Updates X from A to B".
+                # Unparseable or ambiguous input returns None, which skips the PR.
+                name = DEP.search("- " + entry)
+                ver = VER.search(entry)
+                if not name or not ver:
+                    return None
+                hits = re.findall(
+                    r"(?:Bumps|Updates)\s+\[?`?" + re.escape(name.group(1)) + r"`?\]?(?:\([^)]*\))?\s+from\s+(\S+)\s+to\s+(\S+?)\.?(?:\s|$)",
+                    msg,
+                )
+                if len(hits) != 1 or hits[0][1] != ver.group(1):
+                    return None
+                a, b = SEMVER.match(hits[0][0]), SEMVER.match(hits[0][1])
+                if not a or not b:
+                    return None
+                if a.group(1) != b.group(1):
+                    return MAJOR
+                if a.group(1) == "0" and a.group(2) != b.group(2):
+                    return MAJOR  # 0.x minor bumps may break
+                return "version-update:semver-minor"
+
             raw = os.environ.get("COMMITS", "").strip()
             if not raw:
                 print("skip")
@@ -167,6 +193,15 @@ jobs:
                             print("skip")
                             sys.exit(0)
                         found = TYPE.findall(entry)
+                        if len(found) == 0:
+                            # Security-update PRs omit `update-type` from the
+                            # trailer. Derive it from "from A to B" in the body.
+                            derived = derive(msg, entry)
+                            if derived is None:
+                                print("skip")
+                                sys.exit(0)
+                            types.append(derived)
+                            continue
                         if len(found) != 1:
                             print("skip")
                             sys.exit(0)
@@ -253,7 +288,9 @@ jobs:
             --description "Major dependency bump - needs a human" --force || true
           gh label create needs-review --color FBCA04 \
             --description "Awaiting manual review" --force || true
-          gh issue edit "$PR_NUMBER" --add-label "dependabot-major,needs-review" || true
+          # REST labels endpoint: issues:write covers PRs here. `gh issue edit` goes through
+          # GraphQL, which needs pull-requests:write on a PR and failed silently behind `|| true`.
+          gh api "repos/$GH_REPO/issues/$PR_NUMBER/labels" -f "labels[]=dependabot-major" -f "labels[]=needs-review" >/dev/null
 
       - name: Mint GitHub App token for auto-merge
         if: steps.gate.outputs.skip == 'false' && steps.gate.outputs.class == 'non-major'
