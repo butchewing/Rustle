@@ -1,58 +1,274 @@
-# Auto-merge green Dependabot PRs (7-day cooldown policy).
+# Auto-merge green Dependabot PRs (dependabot-setup skill).
 #
-# Non-major updates: squash-merge once checks are green.
-# Major updates: label `dependabot-major` + `needs-review`, leave for a human.
+# Non-major updates: native auto-merge once required checks pass.
+# Major updates: labelled `dependabot-major` + `needs-review`, left for a human.
 #
-# Hardened pattern:
-#   - `pull_request_target` runs in BASE-repo context with the write perms it
-#     needs. We inspect PR *metadata* only and never check out PR code, so
-#     untrusted-code execution is not a concern.
-#   - Third-party actions pinned to immutable commit SHAs. Dependabot keeps
-#     these current via the github-actions entry in dependabot.yml.
-#   - Merging uses GitHub's native auto-merge, which waits for required checks
-#     server-side. The job exits in seconds instead of holding a billable
-#     runner in a `gh pr checks --watch` polling loop.
+# ---------------------------------------------------------------------------
+# PREREQUISITES. This workflow is inert or broken without all four.
+# ---------------------------------------------------------------------------
+#   1. `allow_auto_merge: true` on the repo. `gh pr merge --auto` needs it.
+#      Branch protection is NOT required; with no required checks, auto-merge
+#      fires as soon as the gate below hands it a validated SHA.
+#   2. A CI workflow named `CI` containing the gate job. The `VERIFY_JOB` env
+#      below names it and MUST match the repo's actual job name. The fleet
+#      uses `verify`, `build`, and `check` depending on when the repo was
+#      scaffolded. A wrong name means the gate skips silently and forever.
+#   3. A GitHub App installed on the repo with contents:write and
+#      pull-requests:write. The Actions GITHUB_TOKEN cannot merge in a way
+#      that retriggers CI on the push, which is why the App exists.
+#   4. `vars.AUTOMERGE_APP_CLIENT_ID` and `secrets.AUTOMERGE_APP_PRIVATE_KEY`.
+#      Set these at the ORG level once rather than per repo.
+#
+# ---------------------------------------------------------------------------
+# WHY THE TWO-JOB SPLIT
+# ---------------------------------------------------------------------------
+# `pull_request_target` runs with base-repo privileges on a PR the base repo
+# did not author. The `classify` job therefore takes that trigger with
+# read-only scopes and no token, and does nothing but log. The `automerge`
+# job runs on `workflow_run`, which loads its definition from trusted `main`
+# after CI completes, independently revalidates author/base/state/head, and
+# mints an App token only for the merge itself.
+#
+# `--match-head-commit "$HEAD_SHA"` binds the merge to the exact SHA that was
+# validated, so a push racing the merge cannot slip in unreviewed code.
+#
+# ---------------------------------------------------------------------------
+# `actions: read` IS LOAD-BEARING
+# ---------------------------------------------------------------------------
+# Any traversal of statusCheckRollup or /actions/runs reaches `workflowRun`,
+# an Actions resource. An earlier version of this template granted checks and
+# statuses but not actions, and every run died on
+#   "Resource not accessible by integration (...checkSuite.workflowRun)"
+# while the major-labelling step kept succeeding. 32 of 33 repos in one fleet
+# inherited that defect and merged nothing for weeks, and it read as an
+# ordinary review backlog. Do not remove the scope from the automerge job.
+#
+# ---------------------------------------------------------------------------
+# WHY THE LEGACY VARIANT CANNOT BE FIXED WITH A PERMISSION
+# ---------------------------------------------------------------------------
+# `automerge-legacy-pr-target.yml` runs on `pull_request_target`, so the job
+# is itself a check in the PR's rollup. `gh pr checks --watch` then waits on a
+# rollup containing the very job doing the waiting, which can never go green.
+# Measured on watch-cf-worker#11: created 16:13:59, cancelled 16:29:18 by
+# `timeout-minutes: 15`. Granting `actions: read` gets it past the GraphQL
+# error and straight into that deadlock. The legacy file is kept only as a
+# record of the superseded pattern. Do not adopt it.
+#
+# Third-party actions are pinned to immutable commit SHAs; the github-actions
+# entry in dependabot.yml keeps them current. Verify each SHA resolves to the
+# intended release before adopting.
 name: Dependabot auto-merge
 
-on: pull_request_target
+on:
+  pull_request_target:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
 
 permissions:
-  contents: write
-  pull-requests: write
-  # `gh label create` writes repo labels, which is an issues scope.
-  issues: write
+  contents: read
+  pull-requests: read
 
 jobs:
-  automerge:
+  classify:
+    if: github.event_name == 'pull_request_target' && github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]'
     timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Fetch Dependabot metadata
         id: meta
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Enable auto-merge for non-major updates
-        if: steps.meta.outputs.update-type != 'version-update:semver-major'
-        run: gh pr merge --squash --auto --delete-branch "$PR_URL"
+      - name: Log classification only
+        run: echo "update-type=${UPDATE_TYPE}"
         env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+
+  automerge:
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      issues: write
+    steps:
+      - name: Validate CI run, PR, class, and verify
+        id: gate
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          # Comma-separated CI jobs whose conclusions gate the merge. Each
+          # entry matches the job's API name, which is its `name:` if it sets
+          # one and its key otherwise. A matrix job expands to "<name> (args)",
+          # so an entry also matches anything starting with "<entry> (".
+          # EVERY matched job must have concluded success, and every entry
+          # must match at least one job or the run fails loudly.
+          VERIFY_JOB: build
+          # Loaded via env so the Python stays valid YAML (a column-0 heredoc
+          # terminates the `run: |` block and fails Prettier).
+          CLASSIFIER: |
+            import json, os, re, sys
+
+            MAJOR = "version-update:semver-major"
+            NON_MAJOR = {
+                "version-update:semver-patch",
+                "version-update:semver-minor",
+            }
+            ALLOWED = NON_MAJOR | {MAJOR}
+            TRAILER = re.compile(r"updated-dependencies:\n(.*?)(?:\n\.\.\.|\Z)", re.S)
+            TYPE = re.compile(r"(?m)^\s*update-type:\s*(\S+)\s*$")
+            NAME = re.compile(r"(?m)^\s*-?\s*dependency-name:\s*\S")
+
+            raw = os.environ.get("COMMITS", "").strip()
+            if not raw:
+                print("skip")
+                sys.exit(0)
+
+            decoder = json.JSONDecoder()
+            commits = []
+            idx = 0
+            try:
+                while idx < len(raw):
+                    while idx < len(raw) and raw[idx].isspace():
+                        idx += 1
+                    if idx >= len(raw):
+                        break
+                    obj, end = decoder.raw_decode(raw, idx)
+                    if not isinstance(obj, list):
+                        print("skip")
+                        sys.exit(0)
+                    commits.extend(obj)
+                    idx = end
+            except json.JSONDecodeError:
+                print("skip")
+                sys.exit(0)
+
+            types = []
+            for commit in commits:
+                msg = ((commit.get("commit") or {}).get("message")) or ""
+                for block_m in TRAILER.finditer(msg):
+                    for chunk in re.split(r"(?m)^- ", block_m.group(1)):
+                        chunk = chunk.strip()
+                        if not chunk:
+                            continue
+                        entry = chunk if chunk.startswith("dependency-name:") else None
+                        if entry is None:
+                            print("skip")
+                            sys.exit(0)
+                        if not NAME.search("- " + entry):
+                            print("skip")
+                            sys.exit(0)
+                        found = TYPE.findall(entry)
+                        if len(found) != 1:
+                            print("skip")
+                            sys.exit(0)
+                        types.append(found[0])
+
+            if not types or any(t not in ALLOWED for t in types):
+                print("skip")
+                sys.exit(0)
+            if any(t == MAJOR for t in types):
+                print("major")
+                sys.exit(0)
+            print("non-major")
+        run: |
+          set -euo pipefail
+          PR_JSON="$(gh api "repos/${GH_REPO}/commits/${HEAD_SHA}/pulls")"
+          PR_NUMBER="$(printf '%s' "$PR_JSON" | jq -r '
+            [ .[] | select(.base.ref == "main" and .user.login == "dependabot[bot]") ]
+            | if length == 1 then .[0].number else empty end
+          ')"
+          if [ -z "$PR_NUMBER" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "reason=no unique dependabot PR for this SHA on main" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PR="$(gh api "repos/${GH_REPO}/pulls/${PR_NUMBER}")"
+          AUTHOR="$(printf '%s' "$PR" | jq -r '.user.login')"
+          BASE="$(printf '%s' "$PR" | jq -r '.base.ref')"
+          STATE="$(printf '%s' "$PR" | jq -r '.state')"
+          CURRENT_HEAD="$(printf '%s' "$PR" | jq -r '.head.sha')"
+          if [ "$AUTHOR" != "dependabot[bot]" ] || [ "$BASE" != "main" ] || [ "$STATE" != "open" ] || [ "$CURRENT_HEAD" != "$HEAD_SHA" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "reason=PR author/base/state/head mismatch" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          JOBS="$(gh api --paginate "repos/${GH_REPO}/actions/runs/${RUN_ID}/jobs")"
+          UNMATCHED="$(printf '%s' "$JOBS" | jq -r --arg spec "$VERIFY_JOB" '
+            ($spec | split(",") | map(gsub("^ +| +$"; ""))) as $wanted
+            | [ .jobs[].name ] as $names
+            | [ $wanted[]
+                | . as $w
+                | select([ $names[] | select(. == $w or startswith($w + " (")) ] | length == 0) ]
+            | join(", ")')"
+          if [ -n "$UNMATCHED" ]; then
+            # Misconfiguration, not a red build. Fail the run so it surfaces as
+            # automerge_failing rather than as a repo with nothing to merge.
+            echo "::error::VERIFY_JOB entries matched no job: ${UNMATCHED}. Jobs present: $(printf '%s' "$JOBS" | jq -r '[.jobs[].name] | join(", ")')"
+            exit 1
+          fi
+          BAD="$(printf '%s' "$JOBS" | jq -r --arg spec "$VERIFY_JOB" '
+            ($spec | split(",") | map(gsub("^ +| +$"; ""))) as $wanted
+            | [ .jobs[] as $j
+                | select([ $wanted[] as $w | select($j.name == $w or ($j.name | startswith($w + " ("))) ] | length > 0)
+                | select($j.conclusion != "success")
+                | "\($j.name)=\($j.conclusion // "none")" ]
+            | join(", ")')"
+          if [ -n "$BAD" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "reason=gate jobs not success: ${BAD}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          COMMITS="$(gh api --paginate "repos/${GH_REPO}/pulls/${PR_NUMBER}/commits")"
+          CLASS="$(COMMITS="$COMMITS" python3 -c "$CLASSIFIER")"
+          case "$CLASS" in
+            major|non-major) ;;
+            *)
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "reason=classification skipped (got ${CLASS:-empty})" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
 
       - name: Label major updates for manual review
-        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        if: steps.gate.outputs.skip == 'false' && steps.gate.outputs.class == 'major'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.gate.outputs.pr_number }}
         run: |
-          # `gh pr edit --add-label` exits non-zero when a label is missing from
-          # the repo, which failed this job on every major bump. Create the
-          # labels first (idempotent) and never let labelling break the run.
           gh label create dependabot-major --color D93F0B \
             --description "Major dependency bump - needs a human" --force || true
           gh label create needs-review --color FBCA04 \
             --description "Awaiting manual review" --force || true
-          gh pr edit "$PR_URL" --add-label "dependabot-major,needs-review" || true
+          gh issue edit "$PR_NUMBER" --add-label "dependabot-major,needs-review" || true
+
+      - name: Mint GitHub App token for auto-merge
+        if: steps.gate.outputs.skip == 'false' && steps.gate.outputs.class == 'non-major'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.AUTOMERGE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AUTOMERGE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Enable auto-merge for non-major updates
+        if: steps.gate.outputs.skip == 'false' && steps.gate.outputs.class == 'non-major'
         env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.server_url }}/${{ github.repository }}/pull/${{ steps.gate.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.gate.outputs.head_sha }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: gh pr merge --squash --auto --delete-branch --match-head-commit "$HEAD_SHA" "$PR_URL"
